@@ -55,7 +55,8 @@ POST {{host}}/api/travel-plans/{{race_plan_id}}/locations
 Content-Type: application/json
 {
   "name": "Location A",
-  "budget": 100.00
+  "budget": 100.00,
+  "parent_version": 2
 }
 
 HTTP 201
@@ -66,7 +67,8 @@ POST {{host}}/api/travel-plans/{{race_plan_id}}/locations
 Content-Type: application/json
 {
   "name": "Location B", 
-  "budget": 150.00
+  "budget": 150.00,
+  "parent_version": 3
 }
 
 HTTP 201
@@ -77,7 +79,8 @@ POST {{host}}/api/travel-plans/{{race_plan_id}}/locations
 Content-Type: application/json
 {
   "name": "Location C",
-  "budget": 200.00
+  "budget": 200.00,
+  "parent_version": 4
 }
 
 HTTP 201
@@ -95,7 +98,7 @@ jsonpath "$.locations[1].visit_order" == 2
 jsonpath "$.locations[2].visit_order" == 3
 
 # Strategy 3: Cascade Delete Race Condition Test
-DELETE {{host}}/api/travel-plans/{{race_plan_id}}
+DELETE {{host}}/api/travel-plans/{{race_plan_id}}?version=5
 
 HTTP 204
 

@@ -21,7 +21,8 @@ Content-Type: application/json
   "arrival_date": "2025-06-02T09:00:00Z",
   "departure_date": "2025-06-02T12:00:00Z",
   "budget": 25.00,
-  "notes": "Visit in the morning for fewer crowds"
+  "notes": "Visit in the morning for fewer crowds",
+  "parent_version": 1
 }
 
 HTTP 201
@@ -42,7 +43,8 @@ Content-Type: application/json
   "latitude": 48.8606,
   "longitude": 2.3376,
   "budget": 15.00,
-  "notes": "Book tickets online"
+  "notes": "Book tickets online",
+  "parent_version": 2
 }
 
 HTTP 201
@@ -57,7 +59,8 @@ POST {{host}}/api/travel-plans/{{location_plan_id}}/locations
 Content-Type: application/json
 {
   "name": "Arc de Triomphe",
-  "budget": 12.00
+  "budget": 12.00,
+  "parent_version": 3
 }
 
 HTTP 201
@@ -84,7 +87,8 @@ Content-Type: application/json
 {
   "name": "Eiffel Tower (Night Visit)",
   "budget": 30.00,
-  "notes": "Amazing night illumination"
+  "notes": "Amazing night illumination",
+  "parent_version": 4
 }
 
 HTTP 200
@@ -94,7 +98,7 @@ jsonpath "$.budget" == 30.00
 jsonpath "$.notes" == "Amazing night illumination"
 
 # Test 6: Delete location
-DELETE {{host}}/api/locations/{{location2_id}}
+DELETE {{host}}/api/locations/{{location2_id}}?parent_version=5
 
 HTTP 204
 
@@ -107,5 +111,5 @@ jsonpath "$.locations" count == 2
 # Order may have gaps (1,3) which is acceptable
 
 # Cleanup
-DELETE {{host}}/api/travel-plans/{{location_plan_id}}
+DELETE {{host}}/api/travel-plans/{{location_plan_id}}?version=6
 HTTP 204

@@ -71,7 +71,7 @@ jsonpath "$.error" contains "Conflict"
 jsonpath "$.error" contains "modified"
 
 # Test 5: Delete plan
-DELETE {{host}}/api/travel-plans/{{plan_id}}
+DELETE {{host}}/api/travel-plans/{{plan_id}}?version={{updated_version}}
 
 HTTP 204
 
