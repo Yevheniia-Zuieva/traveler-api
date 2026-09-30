@@ -112,10 +112,10 @@ class LocationBase(BaseModel):
         return self
 
 class CreateLocationRequest(LocationBase):
-    pass
+    parent_version: int = Field(..., ge=1) # Версія плану, яку бачить клієнт
 
 class UpdateLocationRequest(LocationBase):
-    pass
+    parent_version: int = Field(..., ge=1) 
 
 class TravelPlan(TravelPlanBase):
     id: uuid.UUID
@@ -341,17 +341,23 @@ async def update_travel_plan(id: uuid.UUID, plan: UpdateTravelPlanRequest):
         500: {"description": "Internal server error"}
     }
 )
-async def delete_travel_plan(id: uuid.UUID):
+async def delete_travel_plan(id: uuid.UUID, version: int): 
     try:
         async with pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM travel_plans WHERE id = $1", id)
+            result = await conn.execute("DELETE FROM travel_plans WHERE id = $1 AND version = $2", id, version)
             
             if result == "DELETE 0":
+                # Перевіряємо, чи план не знайдено, чи це конфлікт версій
+                exists = await conn.fetchval("SELECT version FROM travel_plans WHERE id = $1", id)
+                if exists is None:
+                    return JSONResponse(status_code=404, content={"error": "Travel plan not found"})
+                
+                # Якщо план існує, але версія не збіглася — це 409 Conflict
                 return JSONResponse(
-                    status_code=404,
+                    status_code=409,
                     content={
-                        "error": "Travel plan not found",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                        "error": "Conflict: Travel plan was modified by another user",
+                        "current_version": exists
                     }
                 )
                 
@@ -395,15 +401,28 @@ async def add_location(id: uuid.UUID, loc: CreateLocationRequest):
             async with conn.transaction():
                 # Блокування батьківського плану подорожі для уникнення конфліктів
                 plan = await conn.fetchrow(
-                    "UPDATE travel_plans SET version=version+1, updated_at=NOW() WHERE id=$1 RETURNING id", 
-                    id
+                    "UPDATE travel_plans SET version=version+1, updated_at=NOW() WHERE id=$1 AND version=$2 RETURNING version", 
+                    id, loc.parent_version
                 )
                 if not plan:
+                    # Перевіряємо, чи план не знайдено, чи це конфлікт версій
+                    current_v = await conn.fetchval("SELECT version FROM travel_plans WHERE id = $1", id)
+                    
+                    if current_v is None:
+                        return JSONResponse(
+                            status_code=404,
+                            content={
+                                "error": "Travel plan not found",
+                                "timestamp": datetime.utcnow().isoformat() + "Z"
+                            }
+                        )
+                    
+                    # Якщо план існує, але версія не збіглася — це 409 Conflict
                     return JSONResponse(
-                        status_code=404,
+                        status_code=409,
                         content={
-                            "error": "Travel plan not found",
-                            "timestamp": datetime.utcnow().isoformat() + "Z"
+                            "error": "Conflict: The travel plan was modified by another user",
+                            "current_version": current_v
                         }
                     )
                 
@@ -469,8 +488,22 @@ async def update_location(id: uuid.UUID, loc: UpdateLocationRequest):
                         }
                     )
 
-                # Оновлюємо версію плану та блокуємо батьківський план подорожі від інших змін
-                await conn.execute("UPDATE travel_plans SET version = version + 1, updated_at = NOW() WHERE id = $1", plan_id)
+                # Перевіряємо parent_version при блокуванні
+                plan = await conn.fetchrow(
+                    "UPDATE travel_plans SET version = version + 1, updated_at = NOW() WHERE id = $1 AND version = $2 RETURNING version", 
+                    plan_id, loc.parent_version
+                )
+                
+                if not plan:
+                    # Отримуємо реальну поточну версію для повідомлення
+                    current_v = await conn.fetchval("SELECT version FROM travel_plans WHERE id = $1", plan_id)
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": "Conflict: The travel plan was modified by another user",
+                            "current_version": current_v
+                        }
+                    )
 
                 # Оновлюємо саму локацію в ізольованому середовищі
                 query = """
@@ -500,7 +533,7 @@ async def update_location(id: uuid.UUID, loc: UpdateLocationRequest):
         500: {"description": "Internal server error"}
     }
 )
-async def delete_location(id: uuid.UUID):
+async def delete_location(id: uuid.UUID, parent_version: int):
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -514,7 +547,16 @@ async def delete_location(id: uuid.UUID):
                         }
                     )
 
-                await conn.execute("UPDATE travel_plans SET version = version + 1, updated_at = NOW() WHERE id = $1", plan_id)
+                # Блокуємо план із перевіркою версії
+                plan = await conn.fetchrow(
+                    "UPDATE travel_plans SET version = version + 1, updated_at = NOW() WHERE id = $1 AND version = $2 RETURNING version", 
+                    plan_id, parent_version
+                )
+                
+                if not plan:
+                    current_v = await conn.fetchval("SELECT version FROM travel_plans WHERE id = $1", plan_id)
+                    return JSONResponse(status_code=409, content={"error": "Conflict", "current_version": current_v})
+                
                 await conn.execute("DELETE FROM locations WHERE id = $1", id)
                 
         return Response(status_code=204)
