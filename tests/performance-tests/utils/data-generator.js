@@ -60,7 +60,7 @@ export function generateTravelPlan() {
  * Генерує випадкову локацію
  * @returns {object} Об'єкт location
  */
-export function generateLocation() {
+export function generateLocation(parentVersion = 1) {
   const location = randomItem(LOCATIONS);
   const city = randomItem(CITIES);
   
@@ -75,6 +75,7 @@ export function generateLocation() {
     longitude: longitude,
     budget: parseFloat((Math.random() * 500 + 10).toFixed(2)),
     notes: `Must-see attraction in ${city}`,
+    parent_version: parentVersion,
   };
 }
 
