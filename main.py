@@ -20,8 +20,17 @@ pool = None
 @app.on_event("startup")
 async def startup():
     global pool
-    pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=5, max_size=20)
+    # Встановлює SERIALIZABLE за замовчуванням для всіх з'єднань пулу
+    async def init_connection(conn):
+        await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
 
+    pool = await asyncpg.create_pool(
+        dsn=DB_DSN, 
+        min_size=5, 
+        max_size=20,
+        init=init_connection
+    )
+    
 @app.on_event("shutdown")
 async def shutdown():
     await pool.close()
@@ -609,3 +618,9 @@ async def health_check():
                 }
             }
         )
+
+@app.get("/api/check-isolation")
+async def check_isolation():
+    async with pool.acquire() as conn:
+        isolation = await conn.fetchval("SHOW transaction_isolation;")
+        return {"current_isolation_level": isolation}
