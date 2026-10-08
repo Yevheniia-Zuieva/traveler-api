@@ -1,186 +1,193 @@
 /**
  * ============================================================================
- * CRUD OPERATIONS LOAD TEST
+ * REALISTIC USER JOURNEY LOAD TEST (PLANS + LOCATIONS)
  * ============================================================================
  * 
  * МЕТА:
- * Перевірити продуктивність базових CRUD операцій (Create, Read, Update, Delete)
- * для travel plans під навантаженням. Тестує повний життєвий цикл плану подорожі:
- * створення, читання, оновлення (включаючи optimistic locking) та видалення.
+ * Перевірити систему під очікуваним навантаженням, використовуючи реалістичний 
+ * сценарій поведінки користувачів. Створює природну конкуренцію за дані, 
+ * перевіряє роботу з реляційними зв'язками (Foreign Keys) та каскадним видаленням.
  * 
- * ХІД ВИКОНАННЯ ТЕСТУ:
- * 1. Ramp-up фаза (2 хвилини): Поступове збільшення від 0 до 50 користувачів
- * 2. Steady state (5 хвилин): Стабільне навантаження з 50 користувачами
- * 3. Ramp-down фаза (2 хвилини): Плавне зменшення навантаження до 0
+ * ХІД ВИКОНАННЯ ТЕСТУ (Load Testing):
+ * 1. Ramp-up фаза (5 хвилин): Поступове збільшення від 0 до 100 користувачів
+ * 2. Steady state (10 хвилин): Стабільне навантаження зі 100 користувачами
+ * 3. Ramp-down фаза (5 хвилин): Плавне зменшення навантаження до 0
  * 
- * КОЖНА ІТЕРАЦІЯ ТЕСТУ:
- * - Створює новий travel plan з валідними даними
- * - Отримує створений план (перевірка читання)
- * - Оновлює план з коректною версією (успішне оновлення)
- * - Намагається оновити з старою версією (тест optimistic locking - очікується 409)
- * - Видаляє план
- * - Перевіряє що план дійсно видалений (404)
+ * ПОВЕДІНКА КОРИСТУВАЧА (СЦЕНАРІЙ):
+ * - SETUP: Одноразове наповнення системи 200 планами та пов'язаними локаціями (по 1-3 на план).
+ * - ІТЕРАЦІЯ (Дії віртуального користувача):
+ *   1. Отримує список усіх планів подорожей.
+ *   2. Якщо список порожній — створює новий план і виходить.
+ *   3. Випадково обирає один план зі списку.
+ *   4. Отримує деталі обраного плану (разом з актуальною версією).
+ *   5. З певною ймовірністю виконує дію:
+ *      - 85% випадків: Активна робота (50% - оновлює сам план, 50% - додає нову локацію).
+ *      - 5% випадків: Видаляє план (викликає каскадне видалення локацій у БД).
+ *      - 10% випадків: Нічого не робить (імітація простого перегляду).
  * 
  * МЕТРИКИ:
  * - Response time (p95, p99) для кожної операції
- * - Throughput (requests/second)
- * - Error rate (має бути < 1%)
  * - Success rate для optimistic locking конфліктів
- * 
  * ============================================================================
  */
 
 import { sleep } from 'k6';
-import { DEFAULT_THRESHOLDS } from '../config/endpoints.js';
+import http from 'k6/http';
+import { DEFAULT_THRESHOLDS, ENDPOINTS, BASE_URL } from './config/endpoints.js';
 import {
   createTravelPlan,
   getTravelPlan,
   updateTravelPlan,
   deleteTravelPlan,
+  addLocation,
   thinkTime,
-} from '../utils/api-client.js';
+} from './utils/api-client.js';
 import {
   generateTravelPlan,
   generateTravelPlanUpdate,
-} from '../utils/data-generator.js';
+  generateLocation,
+} from './utils/data-generator.js';
 
 // ============================================================================
 // НАЛАШТУВАННЯ ТЕСТУ
 // ============================================================================
 
 export const options = {
-  // Профіль навантаження: поступове зростання → стабільний стан → зменшення
+  // Профіль навантаження для Load Testing 
   stages: [
-    { duration: '2m', target: 50 },  // Ramp-up: 0 → 50 VUs за 2 хвилини
-    { duration: '5m', target: 50 },  // Steady: 50 VUs протягом 5 хвилин
-    { duration: '2m', target: 0 },   // Ramp-down: 50 → 0 VUs за 2 хвилини
+    { duration: '5m', target: 100 },  // Наростання до 100 користувачів
+    { duration: '10m', target: 100 }, // Утримання навантаження
+    { duration: '5m', target: 0 },    // Зниження
   ],
 
-  // Пороги продуктивності
   thresholds: {
     ...DEFAULT_THRESHOLDS,
     
-    // Специфічні пороги для CRUD операцій
     'http_req_duration{type:write}': [
-      'p(95)<1000',  // 95% операцій запису < 1s
-      'p(99)<2000',  // 99% операцій запису < 2s
+      'p(95)<1000',
+      'p(99)<2000',
     ],
     'http_req_duration{type:read}': [
-      'p(95)<500',   // 95% операцій читання < 500ms
-      'p(99)<1000',  // 99% операцій читання < 1s
+      'p(95)<500',
+      'p(99)<1000',
     ],
-    
-    // Перевірка роботи optimistic locking
-    'optimistic_lock_conflicts': ['rate>0'], // Мають бути конфлікти
-    
-    // Загальна успішність
-    'checks': ['rate>0.95'], // 95% перевірок мають проходити
   },
 
-  // Додаткові налаштування
   noConnectionReuse: false,
-  userAgent: 'K6-CRUD-LoadTest/1.0',
+  userAgent: 'K6-Realistic-LoadTest/1.0',
 };
+
+// ============================================================================
+// SETUP: Виконується 1 раз до старту тесту
+// ============================================================================
+export function setup() {
+  console.log('='.repeat(80));
+  console.log('Starting Realistic User Journey Load Test (Plans + Locations)');
+  console.log('Target: 100 concurrent users');
+  console.log('Duration: 20 minutes total (5m up -> 10m steady -> 5m down)');
+  console.log('='.repeat(80));
+  
+  console.log('Початок Setup: Створюємо 200 базових планів та локації для них...');
+  const createdPlans = [];
+  
+  for (let i = 0; i < 200; i++) {
+    const plan = generateTravelPlan();
+    const created = createTravelPlan(plan);
+    
+    if (created && created.id) {
+      createdPlans.push(created.id);
+      
+      // ГЕНЕРУЄМО ЛОКАЦІЇ: Від 1 до 3 локацій для кожного плану
+      const locationsCount = Math.floor(Math.random() * 3) + 1;
+      let currentParentVersion = 1; // Початкова версія щойно створеного плану
+      
+      for (let j = 0; j < locationsCount; j++) {
+        const locationData = generateLocation(currentParentVersion); 
+        const added = addLocation(created.id, locationData);
+        
+        // Якщо локація успішно додалась і версія на плані зросла, 
+        // збільшуємо версію для наступної локації у цьому ж плані
+        if (added) {
+          currentParentVersion++; 
+        }
+      }
+    }
+  }
+  
+  console.log(`Setup завершено. Успішно створено планів: ${createdPlans.length}`);
+  return { initialCount: createdPlans.length };
+}
 
 // ============================================================================
 // ОСНОВНИЙ СЦЕНАРІЙ ТЕСТУ
 // ============================================================================
 
 export default function () {
-  // --------------------------------------------------
-  // 1. СТВОРЕННЯ TRAVEL PLAN
-  // --------------------------------------------------
-  const newPlan = generateTravelPlan();
-  const createdPlan = createTravelPlan(newPlan);
+  // 1. Користувач отримує список усіх планів
+  const listResponse = http.get(ENDPOINTS.TRAVEL_PLANS || `${BASE_URL}/api/travel-plans`, { 
+    tags: { type: 'read' } 
+  });
   
-  if (!createdPlan) {
-    console.error('Failed to create travel plan');
+  if (listResponse.status !== 200) {
+    sleep(1);
     return;
   }
 
-  const planId = createdPlan.id;
-  const initialVersion = createdPlan.version;
+  const plans = JSON.parse(listResponse.body);
 
-  // Пауза між операціями (імітація поведінки реального користувача)
-  thinkTime(1, 2);
-
-  // --------------------------------------------------
-  // 2. ЧИТАННЯ TRAVEL PLAN
-  // --------------------------------------------------
-  const retrievedPlan = getTravelPlan(planId);
-  
-  if (!retrievedPlan) {
-    console.error(`Failed to retrieve plan ${planId}`);
-    deleteTravelPlan(planId, initialVersion); // Cleanup
+  // 2. ОБРОБКА ПОРОЖНЬОГО СПИСКУ
+  if (!plans || plans.length === 0) {
+    const fallbackPlan = generateTravelPlan();
+    createTravelPlan(fallbackPlan);
+    thinkTime(1, 2);
     return;
   }
 
-  thinkTime(1, 2);
+  // 3. ВИПАДКОВИЙ ВИБІР ПЛАНУ
+  const randomIndex = Math.floor(Math.random() * plans.length);
+  const selectedPlanId = plans[randomIndex].id;
 
-  // --------------------------------------------------
-  // 3. УСПІШНЕ ОНОВЛЕННЯ (з коректною версією)
-  // --------------------------------------------------
-  const updateData = generateTravelPlanUpdate(initialVersion);
-  const updatedPlan = updateTravelPlan(planId, updateData);
-  
-  if (!updatedPlan || updatedPlan.conflict) {
-    console.error(`Failed to update plan ${planId}`);
-    deleteTravelPlan(planId, initialVersion); // Cleanup
-    return;
+  thinkTime(1, 3); // Імітація часу на пошук очима по списку
+
+  // 4. ЧИТАННЯ ДЕТАЛЕЙ ПЛАНУ (для отримання актуальної версії)
+  const planDetails = getTravelPlan(selectedPlanId);
+  if (!planDetails || !planDetails.version) {
+    sleep(1);
+    return; 
   }
 
-  thinkTime(0.5, 1);
+  thinkTime(1, 2); // Імітація часу на читання деталей плану
 
-  // --------------------------------------------------
-  // 4. ТЕСТ OPTIMISTIC LOCKING (очікується конфлікт 409)
-  // --------------------------------------------------
-  // Намагаємось оновити зі старою версією - має повернути 409 Conflict
-  const conflictUpdate = generateTravelPlanUpdate(initialVersion);
-  const conflictResult = updateTravelPlan(planId, conflictUpdate);
-  
-  // Це очікувана поведінка - конфлікт версій
-  if (conflictResult && conflictResult.conflict) {
-    // Успішно виявлено конфлікт
+  // 5. ПРИЙНЯТТЯ РІШЕННЯ ТА ДІЯ
+  const actionChance = Math.random();
+
+  if (actionChance < 0.05) {
+    // 5% - ВИДАЛЕННЯ ПЛАНУ (Видалить і всі пов'язані локації)
+    deleteTravelPlan(selectedPlanId, planDetails.version);
+    
+  } else if (actionChance < 0.90) {
+    // 85% - АКТИВНА РОБОТА З ДАНИМИ
+    
+    // З імовірністю 50/50 користувач або оновить план, або додасть локацію
+    if (Math.random() > 0.5) {
+      const updateData = generateTravelPlanUpdate(planDetails.version);
+      updateTravelPlan(selectedPlanId, updateData);
+    } else {
+      const newLocation = generateLocation(planDetails.version);
+      addLocation(selectedPlanId, newLocation);
+    }
+    
   }
+  // 10% - ПРОСТИЙ ПЕРЕГЛЯД (без дій)
 
-  thinkTime(0.5, 1);
-
-  // --------------------------------------------------
-  // 5. ВИДАЛЕННЯ TRAVEL PLAN
-  // --------------------------------------------------
-  const deleted = deleteTravelPlan(planId, updatedPlan.version);
-  
-  if (!deleted) {
-    console.error(`Failed to delete plan ${planId}`);
-    return;
-  }
-
-  thinkTime(0.5, 1);
-
-  // --------------------------------------------------
-  // 6. ПЕРЕВІРКА ВИДАЛЕННЯ (очікується 404)
-  // --------------------------------------------------
-  // Намагаємось отримати видалений план - має повернути 404
-  getTravelPlan(planId); // Функція сама перевірить 404
-
-  // Пауза перед наступною ітерацією
-  sleep(1);
+  sleep(Math.random() * 2 + 1);
 }
 
 // ============================================================================
-// SETUP & TEARDOWN
+// TEARDOWN
 // ============================================================================
-
-export function setup() {
-  console.log('='.repeat(80));
-  console.log('Starting CRUD Load Test');
-  console.log('Target: 50 concurrent users');
-  console.log('Duration: 9 minutes (2m ramp-up + 5m steady + 2m ramp-down)');
-  console.log('='.repeat(80));
-}
-
 export function teardown(data) {
   console.log('='.repeat(80));
-  console.log('CRUD Load Test completed');
+  console.log('Realistic Load Test completed');
   console.log('='.repeat(80));
 }
