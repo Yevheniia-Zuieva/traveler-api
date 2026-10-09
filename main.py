@@ -9,6 +9,7 @@ import os
 import uuid
 import time
 from dotenv import load_dotenv
+from async_lru import alru_cache
 
 load_dotenv()
 
@@ -17,18 +18,14 @@ app = FastAPI(title="Travel Planner API", version="1.0.0")
 DB_DSN = os.getenv("DATABASE_URL")
 pool = None
 
+#-- Базовий рівень ізоляції READ COMMITTED
 @app.on_event("startup")
 async def startup():
     global pool
-    # Встановлює SERIALIZABLE за замовчуванням для всіх з'єднань пулу
-    async def init_connection(conn):
-        await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
-
     pool = await asyncpg.create_pool(
         dsn=DB_DSN, 
         min_size=5, 
-        max_size=20,
-        init=init_connection
+        max_size=20
     )
     
 @app.on_event("shutdown")
@@ -47,6 +44,21 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
     )
+
+# --- LRU Кеш для читання деталей плану ---
+# maxsize=100 відповідає кількості паралельних користувачів
+@alru_cache(maxsize=100)
+async def fetch_plan_details(plan_id: uuid.UUID):
+    async with pool.acquire() as conn:
+        plan = await conn.fetchrow("SELECT * FROM travel_plans WHERE id = $1", plan_id)
+        if not plan:
+            return None
+        locations = await conn.fetch(
+            "SELECT * FROM locations WHERE travel_plan_id = $1 ORDER BY visit_order ASC", plan_id
+        )
+        result = dict(plan)
+        result['locations'] = [dict(loc) for loc in locations]
+        return result
     
 # --- Моделі даних Pydantic ---
 class TravelPlanBase(BaseModel):
@@ -235,30 +247,21 @@ async def create_travel_plan(plan: CreateTravelPlanRequest):
 )
 async def get_travel_plan(id: uuid.UUID):
     try:
-        async with pool.acquire() as conn:
-            plan = await conn.fetchrow("SELECT * FROM travel_plans WHERE id = $1", id)
-            
-            # Обробка помилки 404  
-            if not plan:
-                return JSONResponse(
-                    status_code=404,
-                    content={
-                        "error": "Travel plan not found",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
-                    }
-                )
-                
-            locations = await conn.fetch(
-                "SELECT * FROM locations WHERE travel_plan_id = $1 ORDER BY visit_order ASC", 
-                id
+        # Використовуємо кешовану функцію LRU
+        plan_data = await fetch_plan_details(id)
+        
+        if not plan_data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "Travel plan not found",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }
             )
             
-        result = dict(plan)
-        result['locations'] = [dict(loc) for loc in locations]
-        return result
+        return plan_data
         
     except Exception:
-        # Обробка 500 помилки
         return JSONResponse(
             status_code=500,
             content={
@@ -327,7 +330,9 @@ async def update_travel_plan(id: uuid.UUID, plan: UpdateTravelPlanRequest):
                         "message": "Please refresh and try again"
                     }
                 )
-                
+        
+        # Очищаємо кеш після успішного оновлення плану
+        fetch_plan_details.cache_clear()     
         return dict(row)
         
     except Exception:
@@ -369,6 +374,8 @@ async def delete_travel_plan(id: uuid.UUID, version: int):
                         "current_version": exists
                     }
                 )
+        # Очищаємо кеш після успішного видалення
+        fetch_plan_details.cache_clear()
                 
         return Response(status_code=204)
         
@@ -449,6 +456,9 @@ async def add_location(id: uuid.UUID, loc: CreateLocationRequest):
                     query, id, loc.name, loc.address, loc.latitude, loc.longitude, 
                     next_order, loc.arrival_date, loc.departure_date, loc.budget, loc.notes
                 )
+        # Інвалідація кешу деталей плану
+        fetch_plan_details.cache_clear()
+        
         return dict(row)
         
     except Exception:
@@ -521,6 +531,9 @@ async def update_location(id: uuid.UUID, loc: UpdateLocationRequest):
                     WHERE id=$9 RETURNING *;
                 """
                 row = await conn.fetchrow(query, loc.name, loc.address, loc.latitude, loc.longitude, loc.arrival_date, loc.departure_date, loc.budget, loc.notes, id)
+        
+        # Інвалідація кешу після оновлення локації
+        fetch_plan_details.cache_clear()
         return dict(row)
         
     except Exception:
@@ -568,6 +581,9 @@ async def delete_location(id: uuid.UUID, parent_version: int):
                 
                 await conn.execute("DELETE FROM locations WHERE id = $1", id)
                 
+        # Інвалідація кешу після видалення локації
+        fetch_plan_details.cache_clear()
+
         return Response(status_code=204)
         
     except Exception:

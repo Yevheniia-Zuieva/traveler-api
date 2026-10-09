@@ -44,7 +44,7 @@
 import { check, sleep } from 'k6';
 import { SharedArray } from 'k6/data';
 import { Rate, Counter } from 'k6/metrics';
-import { DEFAULT_THRESHOLDS } from '../config/endpoints.js';
+import { DEFAULT_THRESHOLDS } from './config/endpoints.js';
 import {
   createTravelPlan,
   getTravelPlan,
@@ -53,11 +53,11 @@ import {
   updateTravelPlan,
   deleteTravelPlan,
   thinkTime,
-} from '../utils/api-client.js';
+} from './utils/api-client.js';
 import {
   generateTravelPlan,
   generateLocation,
-} from '../utils/data-generator.js';
+} from './utils/data-generator.js';
 
 // Кастомні метрики для читання
 const readOperations = new Counter('read_operations');
@@ -159,7 +159,7 @@ export function setup() {
       for (let j = 0; j < locationCount; j++) {
         const locationData = generateLocation();
         locationData.parent_version = currentVersion;
-        addLocation(plan.id, locationData);
+        const location = addLocation(plan.id, locationData);
         if (location) currentVersion++;
       }
       
