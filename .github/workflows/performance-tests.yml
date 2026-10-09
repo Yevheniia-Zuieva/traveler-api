@@ -47,21 +47,6 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/travel_planner_db
 
-      - name: Start FastAPI application
-        run: |
-          uvicorn main:app --host 0.0.0.0 --port 3000 &
-          echo "Waiting for FastAPI to be ready..."
-          for i in {1..30}; do
-            if curl -s http://localhost:3000/health | grep -q "status"; then
-              echo "FastAPI is up and running!"
-              break
-            fi
-            echo "Waiting..."
-            sleep 2
-          done
-        env:
-          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/travel_planner_db
-
       - name: Install Grafana k6
         run: |
           sudo mkdir -p /etc/apt/keyrings
@@ -70,8 +55,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y k6
 
-      - name: Run k6 performance test
+      - name: Start App & Run k6 Tests
         run: |
+          # 1. Запуск FastAPI у фоні з виводом логів у файл app.log
+          uvicorn main:app --host 0.0.0.0 --port 3000 > app.log 2>&1 &
+          
+          echo "Waiting for FastAPI server to start..."
+          SERVER_UP=false
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:3000/health | grep -q "status"; then
+              echo "FastAPI is up and running!"
+              SERVER_UP=true
+              break
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 1
+          done
+
+          # Якщо сервер не піднявся, показуємо логи та зупиняємо крок
+          if [ "$SERVER_UP" = false ]; then
+            echo "=== FASTAPI STARTUP LOGS ==="
+            cat app.log
+            exit 1
+          fi
+
+          # 2. Запуск тесту k6
           k6 run tests/performance-tests/ci-performance-test.js
         env:
-          BASE_URL: http://localhost:3000
+          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/travel_planner_db
+          BASE_URL: http://127.0.0.1:3000
