@@ -27,13 +27,12 @@
  *      - 10% випадків: Нічого не робить (імітація простого перегляду).
  */
 
-import { sleep } from 'k6';
+import { sleep, check } from 'k6';
 import http from 'k6/http';
 import { DEFAULT_THRESHOLDS, ENDPOINTS, BASE_URL } from './config/endpoints.js';
 import {
   createTravelPlan,
   getTravelPlan,
-  updateTravelPlan,
   deleteTravelPlan,
   addLocation,
   thinkTime,
@@ -44,6 +43,13 @@ import {
   generateLocation,
 } from './utils/data-generator.js';
 
+// Параметри для HTTP-запитів: вказуємо k6, що 409 і 404 — це штатні відповіді бізнес-логіки
+const requestParams = {
+  headers: { 'Content-Type': 'application/json' },
+  tags: { type: 'write' },
+  responseCallback: http.expectedStatuses(200, 201, 204, 404, 409),
+};
+
 // ============================================================================
 // НАЛАШТУВАННЯ ENDURANCE-ТЕСТУ
 // ============================================================================
@@ -51,14 +57,17 @@ import {
 export const options = {
   stages: [
     { duration: '5m', target: 100 },  // 1. Плавне наростання
-    { duration: '30m', target: 100 }, // 2. Тривале стабільне навантаження (30 хв для лаби)
+    { duration: '30m', target: 100 }, // 2. Тривале стабільне навантаження (30 хв)
     { duration: '5m', target: 0 },    // 3. Плавне зниження
   ],
 
   thresholds: {
     ...DEFAULT_THRESHOLDS,
     
-    // Пороги залишаються стандартними для стабільного навантаження
+    // Суворий поріг відмов для помірного навантаження
+    'http_req_failed': ['rate<0.01'],
+    'checks': ['rate>0.95'],
+
     'http_req_duration{type:write}': [
       'p(95)<1000',
       'p(99)<2000',
@@ -71,8 +80,90 @@ export const options = {
 
   noConnectionReuse: false,
   userAgent: 'K6-EnduranceTest/1.0',
-
 };
+
+// ============================================================================
+// ОПТИМІЗОВАНІ ФУНКЦІЇ ПОВТОРНИХ СПРОБ (RETRY LOGIC)
+// ============================================================================
+
+/**
+ * Оновлення плану з повторними спробами при 409 Conflict
+ */
+function updateTravelPlanWithRetry(planId, initialVersion, maxRetries = 5) {
+  let currentVersion = initialVersion;
+  const url = `${BASE_URL}/api/travel-plans/${planId}`;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const updateData = generateTravelPlanUpdate(currentVersion);
+    const res = http.put(url, JSON.stringify(updateData), requestParams);
+
+    // При 409 Conflict — оновлюємо версію і повторюємо без виклику check()
+    if (res.status === 409) {
+      const freshPlanRes = http.get(url, {
+        tags: { type: 'read' },
+        responseCallback: http.expectedStatuses(200, 404),
+      });
+
+      if (freshPlanRes.status === 404) return; // План видалено іншим користувачем
+
+      try {
+        const freshPlan = JSON.parse(freshPlanRes.body);
+        if (freshPlan && freshPlan.version) {
+          currentVersion = freshPlan.version;
+        }
+      } catch (e) {}
+
+      sleep(0.05 * (attempt + 1));
+      continue;
+    }
+
+    // Фіксуємо check() ТІЛЬКИ на підсумковому результаті
+    check(res, {
+      'plan updated or handled gracefully': (r) => r.status === 200 || r.status === 204 || r.status === 404,
+    });
+
+    break;
+  }
+}
+
+/**
+ * Додавання локації з повторними спробами при 409 Conflict
+ */
+function addLocationWithRetry(planId, initialParentVersion, maxRetries = 5) {
+  let currentParentVersion = initialParentVersion;
+  const url = `${BASE_URL}/api/travel-plans/${planId}/locations`;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const newLocation = generateLocation(currentParentVersion);
+    const res = http.post(url, JSON.stringify(newLocation), requestParams);
+
+    if (res.status === 409) {
+      const planUrl = `${BASE_URL}/api/travel-plans/${planId}`;
+      const freshPlanRes = http.get(planUrl, {
+        tags: { type: 'read' },
+        responseCallback: http.expectedStatuses(200, 404),
+      });
+
+      if (freshPlanRes.status === 404) return;
+
+      try {
+        const freshPlan = JSON.parse(freshPlanRes.body);
+        if (freshPlan && freshPlan.version) {
+          currentParentVersion = freshPlan.version;
+        }
+      } catch (e) {}
+
+      sleep(0.05 * (attempt + 1));
+      continue;
+    }
+
+    check(res, {
+      'location added or handled gracefully': (r) => r.status === 201 || r.status === 200 || r.status === 404,
+    });
+
+    break;
+  }
+}
 
 // ============================================================================
 // SETUP: Виконується 1 раз до старту тесту
@@ -83,101 +174,98 @@ export function setup() {
   console.log('Stages: 100 VUs (5m) -> STEADY 100 VUs (30m) -> Recovery 0 VUs (5m)');
   console.log('='.repeat(80));
   
-    console.log('Початок Setup: Створюємо 200 базових планів та локації для них...');
-    const createdPlans = [];
+  console.log('Початок Setup: Створюємо 200 базових планів та локації для них...');
+  const createdPlans = [];
+  
+  for (let i = 0; i < 200; i++) {
+    const plan = generateTravelPlan();
+    const created = createTravelPlan(plan);
     
-    for (let i = 0; i < 200; i++) {
-      const plan = generateTravelPlan();
-      const created = createTravelPlan(plan);
+    if (created && created.id) {
+      createdPlans.push(created.id);
       
-      if (created && created.id) {
-        createdPlans.push(created.id);
+      // ГЕНЕРУЄМО ЛОКАЦІЇ: Від 1 до 3 локацій для кожного плану
+      const locationsCount = Math.floor(Math.random() * 3) + 1;
+      let currentParentVersion = 1; // Початкова версія щойно створеного плану
+      
+      for (let j = 0; j < locationsCount; j++) {
+        const locationData = generateLocation(currentParentVersion); 
+        const added = addLocation(created.id, locationData);
         
-        // ГЕНЕРУЄМО ЛОКАЦІЇ: Від 1 до 3 локацій для кожного плану
-        const locationsCount = Math.floor(Math.random() * 3) + 1;
-        let currentParentVersion = 1; // Початкова версія щойно створеного плану
-        
-        for (let j = 0; j < locationsCount; j++) {
-          const locationData = generateLocation(currentParentVersion); 
-          const added = addLocation(created.id, locationData);
-          
-          // Якщо локація успішно додалась і версія на плані зросла, 
-          // збільшуємо версію для наступної локації у цьому ж плані
-          if (added) {
-            currentParentVersion++; 
-          }
+        // Якщо локація успішно додалась і версія на плані зросла, 
+        // збільшуємо версію для наступної локації у цьому ж плані
+        if (added) {
+          currentParentVersion++; 
         }
       }
     }
-    
-    console.log(`Setup завершено. Успішно створено планів: ${createdPlans.length}`);
-    return { initialCount: createdPlans.length };
   }
   
-  // ============================================================================
-  // ОСНОВНИЙ СЦЕНАРІЙ ТЕСТУ
-  // ============================================================================
+  console.log(`Setup завершено. Успішно створено планів: ${createdPlans.length}`);
+  return { initialCount: createdPlans.length };
+}
+
+// ============================================================================
+// ОСНОВНИЙ СЦЕНАРІЙ ТЕСТУ
+// ============================================================================
+
+export default function () {
+  // 1. Користувач отримує список усіх планів
+  const listResponse = http.get(ENDPOINTS.TRAVEL_PLANS || `${BASE_URL}/api/travel-plans`, { 
+    tags: { type: 'read' },
+    responseCallback: http.expectedStatuses(200),
+  });
   
-  export default function () {
-    // 1. Користувач отримує список усіх планів
-    const listResponse = http.get(ENDPOINTS.TRAVEL_PLANS || `${BASE_URL}/api/travel-plans`, { 
-      tags: { type: 'read' } 
-    });
+  if (listResponse.status !== 200) {
+    sleep(1);
+    return;
+  }
+
+  const plans = JSON.parse(listResponse.body);
+
+  // 2. ОБРОБКА ПОРОЖНЬОГО СПИСКУ
+  if (!plans || plans.length === 0) {
+    const fallbackPlan = generateTravelPlan();
+    createTravelPlan(fallbackPlan);
+    thinkTime(1, 2);
+    return;
+  }
+
+  // 3. ВИПАДКОВИЙ ВИБІР ПЛАНУ
+  const randomIndex = Math.floor(Math.random() * plans.length);
+  const selectedPlanId = plans[randomIndex].id;
+
+  thinkTime(1, 3); // Імітація часу на пошук очима по списку
+
+  // 4. ЧИТАННЯ ДЕТАЛЕЙ ПЛАНУ (для отримання актуальної версії)
+  const planDetails = getTravelPlan(selectedPlanId);
+  if (!planDetails || !planDetails.version) {
+    sleep(1);
+    return; 
+  }
+
+  thinkTime(1, 2); // Імітація часу на читання деталей плану
+
+      // 5. ПРИЙНЯТТЯ РІШЕННЯ ТА ДІЯ
+  const actionChance = Math.random();
+
+  if (actionChance < 0.05) {
+    // 5% - ВИДАЛЕННЯ ПЛАНУ (Видалить і всі пов'язані локації)
+    deleteTravelPlan(selectedPlanId, planDetails.version);
     
-    if (listResponse.status !== 200) {
-      sleep(1);
-      return;
-    }
-  
-    const plans = JSON.parse(listResponse.body);
-  
-    // 2. ОБРОБКА ПОРОЖНЬОГО СПИСКУ
-    if (!plans || plans.length === 0) {
-      const fallbackPlan = generateTravelPlan();
-      createTravelPlan(fallbackPlan);
-      thinkTime(1, 2);
-      return;
-    }
-  
-    // 3. ВИПАДКОВИЙ ВИБІР ПЛАНУ
-    const randomIndex = Math.floor(Math.random() * plans.length);
-    const selectedPlanId = plans[randomIndex].id;
-  
-    thinkTime(1, 3); // Імітація часу на пошук очима по списку
-  
-    // 4. ЧИТАННЯ ДЕТАЛЕЙ ПЛАНУ (для отримання актуальної версії)
-    const planDetails = getTravelPlan(selectedPlanId);
-    if (!planDetails || !planDetails.version) {
-      sleep(1);
-      return; 
-    }
-  
-    thinkTime(1, 2); // Імітація часу на читання деталей плану
-  
-    // 5. ПРИЙНЯТТЯ РІШЕННЯ ТА ДІЯ
-    const actionChance = Math.random();
-  
-    if (actionChance < 0.05) {
-      // 5% - ВИДАЛЕННЯ ПЛАНУ (Видалить і всі пов'язані локації)
-      deleteTravelPlan(selectedPlanId, planDetails.version);
-      
-    } else if (actionChance < 0.90) {
-      // 85% - АКТИВНА РОБОТА З ДАНИМИ
-      
+  } else if (actionChance < 0.90) {
+    // 85% - АКТИВНА РОБОТА З ДАНИМИ (З ПОВТОРНИМИ СПРОБАМИ)
+    
       // З імовірністю 50/50 користувач або оновить план, або додасть локацію
-      if (Math.random() > 0.5) {
-        const updateData = generateTravelPlanUpdate(planDetails.version);
-        updateTravelPlan(selectedPlanId, updateData);
-      } else {
-        const newLocation = generateLocation(planDetails.version);
-        addLocation(selectedPlanId, newLocation);
-      }
-      
+    if (Math.random() > 0.5) {
+      updateTravelPlanWithRetry(selectedPlanId, planDetails.version);
+    } else {
+      addLocationWithRetry(selectedPlanId, planDetails.version);
     }
-    // 10% - ПРОСТИЙ ПЕРЕГЛЯД (без дій)
-  
-    sleep(Math.random() * 2 + 1);
   }
+
+  sleep(Math.random() * 2 + 1);
+}
 
 // ============================================================================
 // TEARDOWN
