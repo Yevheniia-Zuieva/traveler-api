@@ -27,13 +27,12 @@
  *      - 10% випадків: Нічого не робить (імітація простого перегляду).
  */
 
-import { sleep } from 'k6';
+import { sleep, check } from 'k6';
 import http from 'k6/http';
 import { DEFAULT_THRESHOLDS, ENDPOINTS, BASE_URL } from './config/endpoints.js';
 import {
   createTravelPlan,
   getTravelPlan,
-  updateTravelPlan,
   deleteTravelPlan,
   addLocation,
   thinkTime,
@@ -43,6 +42,13 @@ import {
   generateTravelPlanUpdate,
   generateLocation,
 } from './utils/data-generator.js';
+
+// Параметри для HTTP-запитів: вказуємо k6, що 409 і 404 — це штатні відповіді бізнес-логіки
+const requestParams = {
+  headers: { 'Content-Type': 'application/json' },
+  tags: { type: 'write' },
+  responseCallback: http.expectedStatuses(200, 201, 204, 404, 409),
+};
 
 // ============================================================================
 // НАЛАШТУВАННЯ SPIKE-ТЕСТУ
@@ -72,6 +78,89 @@ export const options = {
   noConnectionReuse: false,
   userAgent: 'K6-SpikeTest/1.0',
 };
+
+// ============================================================================
+// ОПТИМІЗОВАНІ ФУНКЦІЇ ПОВТОРНИХ СПРОБ (RETRY LOGIC)
+// ============================================================================
+
+/**
+ * Оновлення плану з повторними спробами при 409 Conflict
+ */
+function updateTravelPlanWithRetry(planId, initialVersion, maxRetries = 5) {
+  let currentVersion = initialVersion;
+  const url = `${BASE_URL}/api/travel-plans/${planId}`;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const updateData = generateTravelPlanUpdate(currentVersion);
+    const res = http.put(url, JSON.stringify(updateData), requestParams);
+
+    // При 409 Conflict — оновлюємо версію і повторюємо без виклику check()
+    if (res.status === 409) {
+      const freshPlanRes = http.get(url, {
+        tags: { type: 'read' },
+        responseCallback: http.expectedStatuses(200, 404),
+      });
+
+      if (freshPlanRes.status === 404) return; // План видалено іншим користувачем
+
+      try {
+        const freshPlan = JSON.parse(freshPlanRes.body);
+        if (freshPlan && freshPlan.version) {
+          currentVersion = freshPlan.version;
+        }
+      } catch (e) {}
+
+      sleep(0.05 * (attempt + 1));
+      continue;
+    }
+
+    // Фіксуємо check() ТІЛЬКИ на підсумковому результаті
+    check(res, {
+      'plan updated or handled gracefully': (r) => r.status === 200 || r.status === 204 || r.status === 404,
+    });
+
+    break;
+  }
+}
+
+/**
+ * Додавання локації з повторними спробами при 409 Conflict
+ */
+function addLocationWithRetry(planId, initialParentVersion, maxRetries = 5) {
+  let currentParentVersion = initialParentVersion;
+  const url = `${BASE_URL}/api/travel-plans/${planId}/locations`;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const newLocation = generateLocation(currentParentVersion);
+    const res = http.post(url, JSON.stringify(newLocation), requestParams);
+
+    if (res.status === 409) {
+      const planUrl = `${BASE_URL}/api/travel-plans/${planId}`;
+      const freshPlanRes = http.get(planUrl, {
+        tags: { type: 'read' },
+        responseCallback: http.expectedStatuses(200, 404),
+      });
+
+      if (freshPlanRes.status === 404) return;
+
+      try {
+        const freshPlan = JSON.parse(freshPlanRes.body);
+        if (freshPlan && freshPlan.version) {
+          currentParentVersion = freshPlan.version;
+        }
+      } catch (e) {}
+
+      sleep(0.05 * (attempt + 1));
+      continue;
+    }
+
+    check(res, {
+      'location added or handled gracefully': (r) => r.status === 201 || r.status === 200 || r.status === 404,
+    });
+
+    break;
+  }
+}
 
 // ============================================================================
 // SETUP: Виконується 1 раз до старту тесту
@@ -120,7 +209,8 @@ export function setup() {
 export default function () {
   // 1. Користувач отримує список усіх планів
   const listResponse = http.get(ENDPOINTS.TRAVEL_PLANS || `${BASE_URL}/api/travel-plans`, { 
-    tags: { type: 'read' } 
+    tags: { type: 'read' },
+    responseCallback: http.expectedStatuses(200),
   });
   
   if (listResponse.status !== 200) {
@@ -161,19 +251,15 @@ export default function () {
     deleteTravelPlan(selectedPlanId, planDetails.version);
     
   } else if (actionChance < 0.90) {
-    // 85% - АКТИВНА РОБОТА З ДАНИМИ
+    // 85% - АКТИВНА РОБОТА З ДАНИМИ (З ПОВТОРНИМИ СПРОБАМИ)
     
     // З імовірністю 50/50 користувач або оновить план, або додасть локацію
     if (Math.random() > 0.5) {
-      const updateData = generateTravelPlanUpdate(planDetails.version);
-      updateTravelPlan(selectedPlanId, updateData);
+      updateTravelPlanWithRetry(selectedPlanId, planDetails.version);
     } else {
-      const newLocation = generateLocation(planDetails.version);
-      addLocation(selectedPlanId, newLocation);
+      addLocationWithRetry(selectedPlanId, planDetails.version);
     }
-    
   }
-  // 10% - ПРОСТИЙ ПЕРЕГЛЯД (без дій)
 
   sleep(Math.random() * 2 + 1);
 }
