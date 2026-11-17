@@ -58,12 +58,12 @@ jobs:
       - name: Start App & Run k6 Tests
         run: |
           # 1. Запуск FastAPI у фоні з виводом логів у файл app.log
-          uvicorn main:app --host 0.0.0.0 --port 3000 > app.log 2>&1 &
+          uvicorn main:app --host 0.0.0.0 --port 4567 > app.log 2>&1 &
           
           echo "Waiting for FastAPI server to start..."
           SERVER_UP=false
           for i in {1..30}; do
-            if curl -s http://127.0.0.1:3000/health | grep -q "status"; then
+            if curl -s http://127.0.0.1:4567/health | grep -q "status"; then
               echo "FastAPI is up and running!"
               SERVER_UP=true
               break
@@ -83,4 +83,4 @@ jobs:
           k6 run tests/performance-tests/ci-performance-test.js
         env:
           DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/travel_planner_db
-          BASE_URL: http://127.0.0.1:3000
+          BASE_URL: http://127.0.0.1:4567
