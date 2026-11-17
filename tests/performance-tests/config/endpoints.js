@@ -4,7 +4,7 @@
  */
 
 // Базовий URL API 
-export const BASE_URL = __ENV.API_URL || 'http://localhost:3000';
+export const BASE_URL = __ENV.API_URL || 'http://localhost:4567';
 
 // API Endpoints
 export const ENDPOINTS = {

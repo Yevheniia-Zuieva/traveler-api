@@ -1,0 +1,95 @@
+name: travel_planner
+
+services:
+  # Сервіс бази даних PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: travel_planner_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-travel_planner_db}
+      POSTGRES_USER: ${DB_USER:-travel}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-travel}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docs/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    networks:
+      - travel_planner_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-travel} -d ${DB_NAME:-travel_planner_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
+  # Сервіс FastAPI додатку
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: travel_planner_api
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-travel}:${DB_PASSWORD:-travel}@postgres:5432/${DB_NAME:-travel_planner_db}
+    ports:
+      - "${APP_PORT:-4567}:4567"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - travel_planner_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4567/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    volumes:
+      - app_logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+volumes:
+  postgres_data:
+    driver: local
+  app_logs:
+    driver: local
+
+networks:
+  travel_planner_network:
+    driver: bridge
