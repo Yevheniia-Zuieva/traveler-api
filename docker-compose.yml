@@ -10,6 +10,8 @@ services:
       POSTGRES_DB: ${DB_NAME:-travel_planner_db}
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      REP_USER: ${REP_USER:-repuser}
+      REP_PASSWORD: ${REP_PASSWORD:-rep_pass}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
@@ -68,6 +70,7 @@ services:
     restart: unless-stopped
     environment:
       PGDATA: /var/lib/postgresql/data
+      REP_USER: ${REP_USER:-repuser}
       PGPASSWORD: ${REP_PASSWORD:-rep_pass}
     entrypoint:
       - "bash"
@@ -76,12 +79,12 @@ services:
         set -e
         if [ -z "$$(ls -A "$$PGDATA" 2>/dev/null)" ]; then
           echo "Waiting for primary (postgres) to be ready..."
-          until pg_isready -h postgres -p 5432 -U repuser -d ${DB_NAME:-travel_planner_db}; do
+          until pg_isready -h postgres -p 5432 -U "$$REP_USER" -d ${DB_NAME:-travel_planner_db}; do
             sleep 2
           done
           echo "Running pg_basebackup from primary..."
-          pg_basebackup -h postgres -p 5432 -U repuser -D "$$PGDATA" -Fp -Xs -P -R -S physical_slot_1 -C
-          echo "primary_conninfo = 'host=postgres port=5432 user=repuser password=${REP_PASSWORD:-rep_pass} application_name=replica_1'" >> "$$PGDATA/postgresql.auto.conf"
+          pg_basebackup -h postgres -p 5432 -U "$$REP_USER" -D "$$PGDATA" -Fp -Xs -P -R -S physical_slot_1 -C
+          echo "primary_conninfo = 'host=postgres port=5432 user=$$REP_USER password=$$PGPASSWORD application_name=replica_1'" >> "$$PGDATA/postgresql.auto.conf"
           chown -R postgres:postgres "$$PGDATA"
           chmod 0700 "$$PGDATA"
         fi
