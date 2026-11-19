@@ -25,6 +25,8 @@ services:
       - "max_wal_senders=10"
       - "-c"
       - "hot_standby=on"
+      - "-c"
+      - "synchronous_commit=on"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-migrations:ro
@@ -59,7 +61,7 @@ services:
       - /tmp
       - /var/run/postgresql
 
-  # Standby (physical replica)
+  # Standby (synchronous physical replica)
   postgres_sub:
     image: postgres:16-alpine
     container_name: travel_planner_replica
@@ -79,6 +81,7 @@ services:
           done
           echo "Running pg_basebackup from primary..."
           pg_basebackup -h postgres -p 5432 -U repuser -D "$$PGDATA" -Fp -Xs -P -R -S physical_slot_1 -C
+          echo "primary_conninfo = 'host=postgres port=5432 user=repuser password=${REP_PASSWORD:-rep_pass} application_name=replica_1'" >> "$$PGDATA/postgresql.auto.conf"
           chown -R postgres:postgres "$$PGDATA"
           chmod 0700 "$$PGDATA"
         fi
