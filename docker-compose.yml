@@ -63,7 +63,7 @@ services:
       - /tmp
       - /var/run/postgresql
 
-  # Standby (synchronous physical replica)
+  # Standby 1 (physical replica 1)
   postgres_sub:
     image: postgres:16-alpine
     container_name: travel_planner_replica
@@ -82,7 +82,7 @@ services:
           until pg_isready -h postgres -p 5432 -U "$$REP_USER" -d ${DB_NAME:-travel_planner_db}; do
             sleep 2
           done
-          echo "Running pg_basebackup from primary..."
+          echo "Running pg_basebackup from primary for replica_1..."
           pg_basebackup -h postgres -p 5432 -U "$$REP_USER" -D "$$PGDATA" -Fp -Xs -P -R -S physical_slot_1 -C
           echo "primary_conninfo = 'host=postgres port=5432 user=$$REP_USER password=$$PGPASSWORD application_name=replica_1'" >> "$$PGDATA/postgresql.auto.conf"
           chown -R postgres:postgres "$$PGDATA"
@@ -91,6 +91,64 @@ services:
         exec docker-entrypoint.sh postgres -c listen_addresses='*' -c hot_standby=on
     volumes:
       - postgres_replica_data:/var/lib/postgresql/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - travel_planner_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-travel_planner_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+  # Standby 2 (physical replica 2)
+  postgres_sub_2:
+    image: postgres:16-alpine
+    container_name: travel_planner_replica_2
+    restart: unless-stopped
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      REP_USER: ${REP_USER:-repuser}
+      PGPASSWORD: ${REP_PASSWORD:-rep_pass}
+    entrypoint:
+      - "bash"
+      - "-c"
+      - |
+        set -e
+        if [ -z "$$(ls -A "$$PGDATA" 2>/dev/null)" ]; then
+          echo "Waiting for primary (postgres) to be ready..."
+          until pg_isready -h postgres -p 5432 -U "$$REP_USER" -d ${DB_NAME:-travel_planner_db}; do
+            sleep 2
+          done
+          echo "Running pg_basebackup from primary for replica_2..."
+          pg_basebackup -h postgres -p 5432 -U "$$REP_USER" -D "$$PGDATA" -Fp -Xs -P -R -S physical_slot_2 -C
+          echo "primary_conninfo = 'host=postgres port=5432 user=$$REP_USER password=$$PGPASSWORD application_name=replica_2'" >> "$$PGDATA/postgresql.auto.conf"
+          chown -R postgres:postgres "$$PGDATA"
+          chmod 0700 "$$PGDATA"
+        fi
+        exec docker-entrypoint.sh postgres -c listen_addresses='*' -c hot_standby=on
+    volumes:
+      - postgres_replica_2_data:/var/lib/postgresql/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -169,6 +227,8 @@ volumes:
   postgres_data:
     driver: local
   postgres_replica_data:
+    driver: local
+  postgres_replica_2_data:
     driver: local
   app_logs:
     driver: local
