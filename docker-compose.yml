@@ -20,6 +20,8 @@ services:
       - "-c"
       - "listen_addresses=*"
       - "-c"
+      - "password_encryption=scram-sha-256"
+      - "-c"
       - "wal_level=replica"
       - "-c"
       - "max_replication_slots=10"
@@ -34,8 +36,6 @@ services:
       - ./db/migrations:/docker-entrypoint-migrations:ro
       - ./db/replications/publisher:/docker-entrypoint-replications:ro
       - ./db/replications/common:/docker-entrypoint-initdb.d:ro
-    ports:
-      - "${DB_PORT:-5432}:5432"
     networks:
       - travel_planner_network
     healthcheck:
@@ -91,8 +91,6 @@ services:
         exec docker-entrypoint.sh postgres -c listen_addresses='*' -c hot_standby=on
     volumes:
       - postgres_replica_data:/var/lib/postgresql/data
-    ports:
-      - "55432:5432"
     depends_on:
       postgres:
         condition: service_healthy
