@@ -1,29 +1,47 @@
 name: travel_planner
 
 services:
-  # Сервіс бази даних PostgreSQL
+  # Publisher (master)
   postgres:
     image: postgres:16-alpine
     container_name: travel_planner_db
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${DB_NAME:-travel_planner_db}
-      POSTGRES_USER: ${DB_USER:-travel}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-travel}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    command:
+      - "postgres"
+      - "-c"
+      - "listen_addresses=*"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_logical_replication_workers=4"
+      - "-c"
+      - "max_worker_processes=10"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docs/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/migrations:/docker-entrypoint-migrations:ro
+      - ./db/replications/publisher:/docker-entrypoint-replications:ro
+      - ./db/replications/common:/docker-entrypoint-initdb.d:ro
     ports:
       - "${DB_PORT:-5432}:5432"
     networks:
       - travel_planner_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-travel} -d ${DB_NAME:-travel_planner_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-travel_planner_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -39,6 +57,72 @@ services:
         max-file: "3"
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+  # Subscriber (slave)
+  postgres_sub:
+    image: postgres:16-alpine
+    container_name: travel_planner_replica
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-travel_planner_db}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    command:
+      - "postgres"
+      - "-c"
+      - "listen_addresses=*"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_logical_replication_workers=4"
+      - "-c"
+      - "max_worker_processes=10"
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-migrations:ro
+      - ./db/replications/subscriber:/docker-entrypoint-replications:ro
+      - ./db/replications/common:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "55432:5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - travel_planner_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-travel_planner_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
 
   # Сервіс FastAPI додатку
   app:
@@ -50,7 +134,7 @@ services:
     restart: unless-stopped
     user: "1000:1000"
     environment:
-      DATABASE_URL: postgresql://${DB_USER:-travel}:${DB_PASSWORD:-travel}@postgres:5432/${DB_NAME:-travel_planner_db}
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-travel_planner_db}
     ports:
       - "${APP_PORT:-4567}:4567"
     depends_on:
@@ -86,6 +170,8 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+  postgres_replica_data:
     driver: local
   app_logs:
     driver: local
